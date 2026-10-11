@@ -1,8 +1,6 @@
 import 'package:web/web.dart' as web;
 import 'dart:js_interop';
-
-@JS('eval')
-external JSString _eval(JSString code);
+import 'dart:js_interop_unsafe';
 
 class BrowserDetection {
   static bool get isChrome {
@@ -11,11 +9,6 @@ class BrowserDetection {
   }
 
   static bool get supportsWebBluetooth {
-    try {
-      final res = _eval('("bluetooth" in navigator)'.toJS);
-      return res.toDart.toString() == 'true';
-    } catch (_) {
-      return false;
-    }
+    return web.window.navigator.getProperty<JSAny?>('bluetooth'.toJS) != null;
   }
 }

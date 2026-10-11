@@ -8,7 +8,7 @@ import 'l10n/app_localizations.dart';
 import 'package:provider/provider.dart';
 
 import 'review_mode/review_mode_storage.dart';
-import 'screens/chrome_required_screen.dart';
+import 'screens/web_bluetooth_required_screen.dart';
 import 'utils/platform_info.dart';
 
 import 'connector/meshcore_connector.dart';
@@ -447,7 +447,7 @@ class _MeshCoreAppState extends State<MeshCoreApp> with WidgetsBindingObserver {
               );
             },
             home: (PlatformInfo.isWeb && !PlatformInfo.supportsWebBluetooth)
-                ? const ChromeRequiredScreen()
+                ? const WebBluetoothRequiredScreen()
                 : const ScannerScreen(),
           );
         },
