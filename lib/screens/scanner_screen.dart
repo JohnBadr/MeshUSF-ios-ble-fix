@@ -42,6 +42,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
     _connector = Provider.of<MeshCoreConnector>(context, listen: false);
 
     _connectionListener = () {
+      final message = _connector.disconnectMessage;
+      if (message != null && mounted) {
+        _connector.clearDisconnectMessage();
+        showDismissibleSnackBar(context, content: Text(message));
+      }
       final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
       if (_connector.state == MeshCoreConnectionState.disconnected) {
         _changedNavigation = false;
@@ -220,9 +225,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
     //   return;
     // }   
 
-    // the meshcore open devs put this guardrail to prevent connection over ble on the web but I am not sure why? I removed it and
-    // I was able to connect over ble. Need to investigate as to why.
-    
+    // Removed guardrail preventing BLE on web
+
     if (connector.state == MeshCoreConnectionState.scanning) {
       connector.stopScan();
     } else {

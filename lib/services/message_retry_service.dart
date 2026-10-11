@@ -100,6 +100,9 @@ class MessageRetryService extends ChangeNotifier {
   final Set<String> _activeMessages = {};
   final Set<String> _resolvedMessages = {};
   final Map<String, String> _expectedHashToMessageId = {};
+  final Map<String, int> _attemptGenerations = {};
+  Timer? _resumeTimer;
+  bool _pausedForDisconnect = false;
 
   RetryServiceConfig? _config;
 
@@ -210,14 +213,16 @@ class MessageRetryService extends ChangeNotifier {
       final messageId = queue.removeAt(0);
       if (_pendingMessages.containsKey(messageId)) {
         _activeMessages.add(messageId);
-        _attemptSendOrFail(messageId);
+        _attemptSendOrFail(messageId, _attemptGenerations[messageId] ?? 0);
         return;
       }
     }
   }
 
-  void _attemptSendOrFail(String messageId) {
-    _attemptSend(messageId).catchError((Object e) {
+  void _attemptSendOrFail(String messageId, int generation) {
+    _attemptSend(messageId, generation).catchError((Object e) {
+      if ((_attemptGenerations[messageId] ?? 0) != generation) return;
+      if (_pausedForDisconnect) return;
       debugPrint('_attemptSend threw for $messageId: $e');
       _config?.debugLogService?.warn(
         'Send failed for message $messageId: $e',
@@ -241,13 +246,117 @@ class MessageRetryService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Fails every pending and queued message. Call when the radio link drops:
-  /// nothing in flight can be sent or acknowledged any more.
+  /// Fails every pending and queued message. Use for a deliberate/manual
+  /// disconnect where pending messages should not survive the session.
   void failAllPending() {
+    _resumeTimer?.cancel();
+    _resumeTimer = null;
     _sendQueue.clear();
+    _pausedForDisconnect = false;
     for (final messageId in _pendingMessages.keys.toList()) {
       _failMessage(messageId);
     }
+  }
+
+  /// Pauses messages that are still pending when a transport drops. The
+  /// message records remain in the retry service so they can be queued again
+  /// after the connector completes a new handshake.
+  void pauseAllPending() {
+    _resumeTimer?.cancel();
+    _resumeTimer = null;
+    _pausedForDisconnect = true;
+    _sendQueue.clear();
+    _activeMessages.clear();
+    _resolvedMessages.clear();
+    for (final messageId in _pendingMessages.keys) {
+      _attemptGenerations[messageId] =
+          (_attemptGenerations[messageId] ?? 0) + 1;
+    }
+    _expectedHashToMessageId.clear();
+    _ackHashToMessageId.clear();
+    for (final timer in _timeoutTimers.values) {
+      timer.cancel();
+    }
+    _timeoutTimers.clear();
+
+    for (final entry in _pendingMessages.entries) {
+      final message = entry.value;
+      if (message.status == MessageStatus.failed ||
+          message.status == MessageStatus.delivered) {
+        continue;
+      }
+      final pendingMessage = message.copyWith(status: MessageStatus.pending);
+      _pendingMessages[entry.key] = pendingMessage;
+      _config?.updateMessage(pendingMessage);
+    }
+    notifyListeners();
+  }
+
+  /// Resumes messages retained by [pauseAllPending] after the radio handshake
+  /// has completed and the connector can send frames again.
+  void resumeAllPending() {
+    final getSelfPublicKey = _config?.getSelfPublicKey;
+    if (getSelfPublicKey != null && getSelfPublicKey() == null) {
+      _resumeTimer?.cancel();
+      _resumeTimer = Timer(const Duration(seconds: 1), () {
+        _resumeTimer = null;
+        resumeAllPending();
+      });
+      return;
+    }
+
+    _pausedForDisconnect = false;
+    _sendQueue.clear();
+    _activeMessages.clear();
+    _resolvedMessages.clear();
+    _expectedHashToMessageId.clear();
+    _ackHashToMessageId.clear();
+
+    final pendingCount = _pendingMessages.values
+        .where(
+          (message) =>
+              message.status != MessageStatus.failed &&
+              message.status != MessageStatus.delivered,
+        )
+        .length;
+    _config?.debugLogService?.info(
+      'Resuming $pendingCount pending message(s) after reconnect',
+      tag: 'AckHash',
+    );
+
+    for (final entry in _pendingMessages.entries) {
+      final message = entry.value;
+      if (message.status == MessageStatus.failed ||
+          message.status == MessageStatus.delivered) {
+        continue;
+      }
+      _attemptGenerations[entry.key] =
+          (_attemptGenerations[entry.key] ?? 0) + 1;
+      final pendingMessage = message.copyWith(status: MessageStatus.pending);
+      _pendingMessages[entry.key] = pendingMessage;
+      _config?.updateMessage(pendingMessage);
+      final contact = _pendingContacts[entry.key];
+      if (contact == null) {
+        _config?.debugLogService?.warn(
+          'Cannot resume message ${entry.key}: contact missing',
+          tag: 'AckHash',
+        );
+        continue;
+      }
+      final queue = _sendQueue.putIfAbsent(contact.publicKeyHex, () => []);
+      if (!queue.contains(entry.key)) {
+        queue.add(entry.key);
+      }
+    }
+
+    _resumeTimer?.cancel();
+    _resumeTimer = Timer(const Duration(milliseconds: 750), () {
+      _resumeTimer = null;
+      for (final contactKey in _sendQueue.keys.toList()) {
+        _sendNextForContact(contactKey);
+        if (_activeMessages.length >= _maxGlobalInFlight) break;
+      }
+    });
   }
 
   void _onMessageResolved(String messageId, String contactKey) {
@@ -303,7 +412,7 @@ class MessageRetryService extends ChangeNotifier {
     }
   }
 
-  Future<void> _attemptSend(String messageId) async {
+  Future<void> _attemptSend(String messageId, int generation) async {
     final message = _pendingMessages[messageId];
     final contact = _pendingContacts[messageId];
     final config = _config;
@@ -361,7 +470,9 @@ class MessageRetryService extends ChangeNotifier {
     // Re-validate after async gap — a timer or ACK could have resolved/retried
     // this message while we were awaiting the path callback.
     final currentMessage = _pendingMessages[messageId];
-    if (currentMessage == null || _resolvedMessages.contains(messageId)) {
+    if (currentMessage == null ||
+        _resolvedMessages.contains(messageId) ||
+        (_attemptGenerations[messageId] ?? 0) != generation) {
       debugPrint(
         '_attemptSend: message $messageId resolved during path sync, aborting',
       );
@@ -371,6 +482,10 @@ class MessageRetryService extends ChangeNotifier {
       debugPrint(
         '_attemptSend: message $messageId retryCount changed during path sync, aborting',
       );
+      return;
+    }
+    if (_pausedForDisconnect ||
+        (_attemptGenerations[messageId] ?? 0) != generation) {
       return;
     }
 
@@ -409,6 +524,10 @@ class MessageRetryService extends ChangeNotifier {
       );
     }
 
+    if (_pausedForDisconnect ||
+        (_attemptGenerations[messageId] ?? 0) != generation) {
+      return;
+    }
     await config.sendMessage(contact, message.text, attempt, timestampSeconds);
   }
 
@@ -593,7 +712,7 @@ class MessageRetryService extends ChangeNotifier {
 
       _timeoutTimers[messageId] = Timer(Duration(milliseconds: backoffMs), () {
         if (_pendingMessages.containsKey(messageId)) {
-          _attemptSendOrFail(messageId);
+          _attemptSendOrFail(messageId, _attemptGenerations[messageId] ?? 0);
         }
       });
     } else {
@@ -854,6 +973,10 @@ class MessageRetryService extends ChangeNotifier {
     _sendQueue.clear();
     _activeMessages.clear();
     _resolvedMessages.clear();
+    _attemptGenerations.clear();
+    _resumeTimer?.cancel();
+    _resumeTimer = null;
+    _pausedForDisconnect = false;
     super.dispose();
   }
 }
