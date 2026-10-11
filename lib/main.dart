@@ -446,7 +446,7 @@ class _MeshCoreAppState extends State<MeshCoreApp> with WidgetsBindingObserver {
                 child: child ?? const SizedBox.shrink(),
               );
             },
-            home: (PlatformInfo.isWeb && !PlatformInfo.isChrome)
+            home: (PlatformInfo.isWeb && !PlatformInfo.supportsWebBluetooth)
                 ? const ChromeRequiredScreen()
                 : const ScannerScreen(),
           );

@@ -44,4 +44,7 @@ class PlatformInfo {
   /// Whether USB serial is expected to be available on the current platform.
   static bool get supportsUsbSerial =>
       supportsNativeUsbSerial || supportsWebSerial;
+
+  /// Whether the current browser supports Web Bluetooth
+  static bool get supportsWebBluetooth => isWeb && BrowserDetection.supportsWebBluetooth;
 }
