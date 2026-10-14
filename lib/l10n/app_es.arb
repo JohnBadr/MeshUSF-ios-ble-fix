@@ -9,6 +9,7 @@
   },
   "@@locale": "es",
   "appTitle": "MeshCore Open",
+  "radioDisconnectedReconnecting": "Tu radio se desconectó. Intentando reconectar...",
   "nav_contacts": "Contactos",
   "nav_channels": "Canales",
   "nav_map": "Mapa",

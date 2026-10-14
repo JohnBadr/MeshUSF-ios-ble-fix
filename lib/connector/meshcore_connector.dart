@@ -173,6 +173,8 @@ class MeshCoreRadioStateSnapshot {
 }
 
 class MeshCoreConnector extends ChangeNotifier {
+  static const String radioDisconnectedMessageKey =
+      'radioDisconnectedReconnecting';
   // Message windowing to limit memory usage
   static const int _messageWindowSize = 200;
 
@@ -3390,7 +3392,7 @@ class MeshCoreConnector extends ChangeNotifier {
           'Transport write failed; marking radio disconnected: $error',
           tag: 'Connection',
         );
-        _disconnectMessage = "Your radio disconnected. Trying to reconnect...";
+        _disconnectMessage = radioDisconnectedMessageKey;
         notifyListeners();
         unawaited(() async {
           try {

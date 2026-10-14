@@ -1,6 +1,7 @@
 {
   "@@locale": "en",
   "appTitle": "MeshCore Open",
+  "radioDisconnectedReconnecting": "Your radio disconnected. Trying to reconnect...",
   "nav_contacts": "Contacts",
   "nav_channels": "Channels",
   "nav_map": "Map",

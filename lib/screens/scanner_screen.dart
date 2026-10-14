@@ -45,7 +45,11 @@ class _ScannerScreenState extends State<ScannerScreen> {
       final message = _connector.disconnectMessage;
       if (message != null && mounted) {
         _connector.clearDisconnectMessage();
-        showDismissibleSnackBar(context, content: Text(message));
+        final localizedMessage =
+            message == MeshCoreConnector.radioDisconnectedMessageKey
+            ? context.l10n.radioDisconnectedReconnecting
+            : message;
+        showDismissibleSnackBar(context, content: Text(localizedMessage));
       }
       final isCurrentRoute = ModalRoute.of(context)?.isCurrent ?? true;
       if (_connector.state == MeshCoreConnectionState.disconnected) {
