@@ -12,6 +12,10 @@ class AppLocalizationsEn extends AppLocalizations {
   String get appTitle => 'MeshCore Open';
 
   @override
+  String get radioDisconnectedReconnecting =>
+      'Your radio disconnected. Trying to reconnect...';
+
+  @override
   String get nav_contacts => 'Contacts';
 
   @override

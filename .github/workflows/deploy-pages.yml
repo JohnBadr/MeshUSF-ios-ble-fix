@@ -24,7 +24,7 @@ jobs:
         run: flutter pub get
 
       - name: Build Web
-        run: flutter build web --release --pwa-strategy=none --base-href "/MeshUSF-ios-ble-fix/"
+        run: flutter build web --release --pwa-strategy=none --base-href "/MeshUSF-client/"
 
       - uses: actions/upload-pages-artifact@v3
         with:

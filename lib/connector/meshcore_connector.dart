@@ -173,6 +173,8 @@ class MeshCoreRadioStateSnapshot {
 }
 
 class MeshCoreConnector extends ChangeNotifier {
+  static const String radioDisconnectedMessageKey =
+      'radioDisconnectedReconnecting';
   // Message windowing to limit memory usage
   static const int _messageWindowSize = 200;
 
@@ -192,6 +194,7 @@ class MeshCoreConnector extends ChangeNotifier {
   String? _lastDeviceId;
   String? _lastDeviceDisplayName;
   bool _manualDisconnect = false;
+  String? _disconnectMessage;
 
   /// Non-null while [disconnect] is tearing the transport down. Connect paths
   /// join it so a teardown cannot finish after a new connection and reset the
@@ -222,6 +225,7 @@ class MeshCoreConnector extends ChangeNotifier {
   final Map<String, List<Message>> _conversations = {};
   final Map<int, List<ChannelMessage>> _channelMessages = {};
   final List<String> _pendingChannelSentQueue = [];
+  bool _channelReconnectRetryInFlight = false;
   final PendingCommandReplies _pendingGenericAckQueue = PendingCommandReplies(
     staleAfter: _commandAckTimeout * 2,
   );
@@ -515,6 +519,11 @@ class MeshCoreConnector extends ChangeNotifier {
 
   List<Channel> get channels => List.unmodifiable(_channels);
   bool get isConnected => _state == MeshCoreConnectionState.connected;
+  String? get disconnectMessage => _disconnectMessage;
+  void clearDisconnectMessage() {
+    _disconnectMessage = null;
+  }
+
   bool get isLoadingContacts => _isLoadingContacts;
   bool get hasLoadedContacts => _hasLoadedContacts;
   bool get isLoadingChannels => _isLoadingChannels;
@@ -1514,6 +1523,7 @@ class MeshCoreConnector extends ChangeNotifier {
       );
     } on TimeoutException catch (e) {
       appLogger.warn('No SENT reply for message: $e', tag: 'Connector');
+      rethrow;
     } catch (e) {
       appLogger.error('Failed to send message: $e', tag: 'Connector');
       rethrow;
@@ -2201,7 +2211,7 @@ class MeshCoreConnector extends ChangeNotifier {
       if (!gotSelfInfo) {
         throw StateError('Timed out waiting for SELF_INFO during TCP connect');
       }
-
+      await syncTime();
       await syncTime();
     } catch (error) {
       _appDebugLogService?.error('TCP connection error: $error', tag: 'TCP');
@@ -2309,7 +2319,7 @@ class MeshCoreConnector extends ChangeNotifier {
           'Timed out waiting for SELF_INFO during review connect',
         );
       }
-
+      await syncTime();
       await syncTime();
       if (!isCancelled() && isConnected) {
         radio.start();
@@ -3207,7 +3217,11 @@ class MeshCoreConnector extends ChangeNotifier {
       }
     }
     _setState(MeshCoreConnectionState.disconnecting);
-    _retryService?.failAllPending();
+    if (manual) {
+      _retryService?.failAllPending();
+    } else {
+      _retryService?.pauseAllPending();
+    }
     _stopBatteryPolling();
     _stopRadioStatsPolling();
 
@@ -3364,11 +3378,35 @@ class MeshCoreConnector extends ChangeNotifier {
           withoutResponse: canWriteWithoutResponse,
         );
       }
-    } catch (_) {
+    } catch (error, stackTrace) {
       if (pendingAck != null) {
         _pendingGenericAckQueue.remove(pendingAck);
       }
-      rethrow;
+      // A BLE link can disappear without FlutterBluePlus updating
+      // connectionState before the next write. Treat a failed transport write
+      // as authoritative so the UI stops accepting sends immediately and the
+      // normal disconnect/reconnect cleanup runs.
+      if (isConnected) {
+        _retryService?.pauseAllPending();
+        _appDebugLogService?.error(
+          'Transport write failed; marking radio disconnected: $error',
+          tag: 'Connection',
+        );
+        _disconnectMessage = radioDisconnectedMessageKey;
+        notifyListeners();
+        unawaited(() async {
+          try {
+            await disconnect(manual: false);
+          } catch (disconnectError) {
+            _appDebugLogService?.error(
+              'Disconnect after transport write failure failed: '
+              '$disconnectError',
+              tag: 'Connection',
+            );
+          }
+        }());
+      }
+      Error.throwWithStackTrace(error, stackTrace);
     }
 
     if (pendingAck?.completer != null) {
@@ -4237,6 +4275,56 @@ class MeshCoreConnector extends ChangeNotifier {
           maxResends: settings.channelMinHopsRetries,
         ),
       );
+    }
+  }
+
+  Future<void> _retryPendingChannelMessagesAfterReconnect() async {
+    if (_channelReconnectRetryInFlight || !isConnected) return;
+    _channelReconnectRetryInFlight = true;
+    try {
+      final pending = <ChannelMessage>[];
+      for (final messages in _channelMessages.values) {
+        for (final message in messages) {
+          if (message.isOutgoing &&
+              message.status == ChannelMessageStatus.pending &&
+              message.channelIndex != null) {
+            pending.add(message);
+          }
+        }
+      }
+
+      for (final message in pending) {
+        if (!isConnected) return;
+        final channelIndex = message.channelIndex!;
+        if (!_pendingChannelSentQueue.contains(message.messageId)) {
+          _pendingChannelSentQueue.add(message.messageId);
+        }
+        final outboundText = prepareChannelOutboundText(
+          channelIndex,
+          message.text,
+        );
+        try {
+          await _runScopedChannelSend(() async {
+            await _waitForRadioQuiet(lastInboundRxTime: _lastChannelMsgRxTime);
+            await _sendFrameAndWaitForCommandAck(
+              buildSendChannelTextMsgFrame(
+                channelIndex,
+                outboundText,
+                timestamp: message.timestamp.millisecondsSinceEpoch ~/ 1000,
+              ),
+              channelSendQueueId: message.messageId,
+            );
+          }, region: message.region ?? getEffectiveChannelRegion(channelIndex));
+        } catch (error) {
+          _appDebugLogService?.warn(
+            'Reconnect retry failed for channel message '
+            '${message.messageId}: $error',
+            tag: 'Channel',
+          );
+        }
+      }
+    } finally {
+      _channelReconnectRetryInFlight = false;
     }
   }
 
@@ -5328,6 +5416,8 @@ class MeshCoreConnector extends ChangeNotifier {
     _awaitingSelfInfo = false;
     _selfInfoRetryTimer?.cancel();
     _selfInfoRetryTimer = null;
+    _retryService?.resumeAllPending();
+    unawaited(_retryPendingChannelMessagesAfterReconnect());
     _maybeRequestDeviceConfig();
     notifyListeners();
 
@@ -7565,7 +7655,11 @@ class MeshCoreConnector extends ChangeNotifier {
     _pendingChannelSentQueue.clear();
     _pendingGenericAckQueue.clear();
     _reactionSendQueueSequence = 0;
-    _retryService?.failAllPending();
+    if (_manualDisconnect) {
+      _retryService?.failAllPending();
+    } else {
+      _retryService?.pauseAllPending();
+    }
 
     _setState(MeshCoreConnectionState.disconnected);
     _scheduleReconnect();
